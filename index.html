@@ -519,6 +519,7 @@ void main(){
   float lam = uMonoWl > 1.0 ? uMonoWl : 380.0 + 320.0*rnd();
   float n2  = uNA + uNB/(lam*lam);
   vec3 d = sunStart();
+  vec3 d0 = d;
 
   float path = 0.0;
   bool alive = true;
@@ -531,12 +532,16 @@ void main(){
     d = M * dl;
   }
   if (!alive) return;
+  // misses and parallel-face pass-throughs are the direct beam: drawn
+  // analytically in the display pass, not splatted (see sphere program)
+  if (dot(d, d0) > 0.9999813) return;
   splatOut(d, lam, path);
 }
 `;
 
 const SPLAT_SPHERE_VS = COMMON + SPLAT_SHARED + `
 uniform float uDropR;      // droplet radius in meters; wave-optics hooks fade in as it shrinks
+uniform float uDouble;     // probability of a second scattering event
 
 vec3 rotAA(vec3 v, vec3 ax, float ang){   // Rodrigues, ax unit
   float c = cos(ang), s = sin(ang);
@@ -650,22 +655,28 @@ void main(){
   float n2  = uNA + uNB/(lam*lam);
   float lamM = lam * 1.0e-9;
   vec3 d = sunStart();
+  vec3 d0 = d;
 
-  // forward diffraction (corona) replaces the geometric trace for half the
-  // photons — Babinet: extinction is twice the geometric cross-section
-  if (uDropR < 1.0 && coronaBranch(d, lamM, uDropR)){
-    splatOut(d, lam, 0.0);
-    return;
-  }
-
-  vec3 dIn = d;
   float path = 0.0;
-  int pc = 0;
-  if (!traceSphere(n2, d, path, pc)) return;
-  if (uDropR < 1.0 && pc == 1){
-    gloryBranch(d, dIn, lamM, uDropR);   // windows are disjoint: backscatter...
-    airyBow(d, dIn, n2, lamM, uDropR);   // ...vs the caustic neighborhood
+  bool alive = true;
+  int nScat = rnd() < uDouble ? 2 : 1;
+  for (int s = 0; s < 2; s++){
+    if (s >= nScat || !alive) continue;
+    // forward diffraction (corona) replaces the geometric trace for half the
+    // photons — Babinet: extinction is twice the geometric cross-section
+    if (uDropR < 1.0 && coronaBranch(d, lamM, uDropR)) continue;
+    vec3 dIn = d;
+    int pc = 0;
+    alive = traceSphere(n2, d, path, pc);
+    if (alive && uDropR < 1.0 && pc == 1){
+      gloryBranch(d, dIn, lamM, uDropR); // windows are disjoint: backscatter...
+      airyBow(d, dIn, n2, lamM, uDropR); // ...vs the caustic neighborhood
+    }
   }
+  if (!alive) return;
+  // undeviated photons ARE the direct beam — drawn analytically in the display
+  // pass; splatting them makes the bloom shred the tiny disk into bars
+  if (dot(d, d0) > 0.9999813) return;
   splatOut(d, lam, path);
 }
 `;
@@ -700,6 +711,7 @@ uniform float uBloomAmt;
 uniform int   uProj;         // 0 normal, 1 fisheye 180, 2 all-sky 360
 uniform float uNight;        // 0 = sun, 1 = moonlight (mesopic vision, stars)
 uniform float uPixRad;       // angular size of one pixel, radians
+uniform float uSrcRad;       // angular radius of the sun/moon disk, radians
 
 vec3 aces(vec3 x){ return clamp(x*(2.51*x + 0.03)/(x*(2.43*x + 0.59) + 0.14), 0.0, 1.0); }
 
@@ -801,6 +813,17 @@ void main(){
   hor = mix(hor, vec3(0.82,0.47,0.26), lowSun*0.6*smoothstep(-0.4, 0.8, cosSun)*max(day, 0.25));
   vec3 sky = mix(hor, zen, pow(h, 0.55));
   sky += (vec3(1.0,0.92,0.80)*0.16*exp(-ang*ang*22.0) + vec3(1.0,0.95,0.85)*0.030/(ang*36.0 + 1.0)) * max(day, 0.15);
+  // analytic solar/lunar disk (the direct beam is excluded from the MC map)
+  {
+    float eA = 1.5*fwidth(ang) + 1e-4;
+    float diskA = 1.0 - smoothstep(uSrcRad - eA, uSrcRad + eA, ang);
+    if (diskA > 0.0){
+      float mu = sqrt(max(1.0 - (ang*ang)/(uSrcRad*uSrcRad), 0.0));
+      vec3 srcCol = uNight > 0.5 ? vec3(1.0, 0.86, 0.70)*(0.82 + 0.18*mu)
+                                 : vec3(1.0, 0.98, 0.94);
+      sky += srcCol * 40.0 * diskA;
+    }
+  }
   vec3 bg = sky;
   if (uGround > 0.5 && dir.y < 0.0){
     vec3 g = vec3(0.050,0.056,0.060) * mix(1.25, 0.35, clamp(-dir.y*3.0, 0., 1.)) * max(day, 0.15);
@@ -856,6 +879,7 @@ uniform float uAlphaMin;   // acceptance blur floor, radians
 uniform float uTMin;
 uniform float uTMax;
 uniform vec3  uLampCol;
+uniform float uSigmaInv;   // 1/(pi * entry-disk radius^2) for THIS population
 
 mat3 rotX(float a){ float c=cos(a),s=sin(a); return mat3(1.,0.,0., 0.,c,s, 0.,-s,c); }
 mat3 rotY(float a){ float c=cos(a),s=sin(a); return mat3(c,0.,-s, 0.,1.,0., s,0.,c); }
@@ -1016,7 +1040,7 @@ void main(){
   float w = min(coneRatio / q, 8.0);   // clamp the rare far-tail: kills fireflies,
                                        // slightly dims the outermost fog (accepted)
   w *= exp(-0.03*(t + r));      // cosmetic thin-fog extinction
-  vColor = wl2rgb(lam) * uLampCol * w * 0.25;   // /4: energy split over the 2x2 splat
+  vColor = wl2rgb(lam) * uLampCol * w * uSigmaInv * 0.25;  // /4: 2x2 splat split
 
   vec2 c = (floor(pix) + 0.5)/uResHalf;
   gl_Position = vec4(c*2.0 - 1.0, 0.0, 1.0);
@@ -1079,6 +1103,22 @@ void main(){
 
   c += fogRadiance(gl_FragCoord.xy);
   frag = vec4(pow(aces(uExposure * c), vec3(0.45454545)), 1.0);
+}
+`;
+
+const DOWN_FS = COMMON + `
+out vec4 frag;
+uniform sampler2D uSrc;
+uniform vec2 uRes;       // destination resolution
+uniform vec2 uSrcTexel;  // one texel of the SOURCE in uv
+void main(){
+  // proper 4x4 box prefilter via 4 bilinear taps — point-sampling here shreds
+  // sub-texel-wide bright features (the solar aureole) into discrete lobes
+  vec2 uv = gl_FragCoord.xy / uRes;
+  frag = 0.25 * ( texture(uSrc, uv + uSrcTexel*vec2( 1.0,  1.0))
+                + texture(uSrc, uv + uSrcTexel*vec2(-1.0,  1.0))
+                + texture(uSrc, uv + uSrcTexel*vec2( 1.0, -1.0))
+                + texture(uSrc, uv + uSrcTexel*vec2(-1.0, -1.0)) );
 }
 `;
 
@@ -1152,9 +1192,10 @@ gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, acc
 if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) fail('Float framebuffer not supported on this GPU.');
 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-// bloom: two-pass separable blur of the radiance map at low res
+// bloom: prefiltered downsample + two-pass separable blur, at low res
 const BLOOM_W = 512, BLOOM_H = 256;
 const blurProg = makeProgram(QUAD_VS, BLUR_FS, true);
+const downProg = makeProgram(QUAD_VS, DOWN_FS, true);
 function makeBloomTarget(){
   const t = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, t);
@@ -1172,18 +1213,25 @@ function makeBloomTarget(){
 const bloomA = makeBloomTarget(), bloomB = makeBloomTarget();
 
 function bloomPass(){
-  gl.useProgram(blurProg.p);
   gl.bindVertexArray(vao);
   gl.viewport(0, 0, BLOOM_W, BLOOM_H);
-  gl.uniform2f(blurProg.u.uRes, BLOOM_W, BLOOM_H);
   gl.activeTexture(gl.TEXTURE0);
-  gl.uniform1i(blurProg.u.uSrc, 0);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomA.f);       // downsample + horizontal
+  gl.useProgram(downProg.p);                          // prefiltered 4x4 downsample
+  gl.uniform1i(downProg.u.uSrc, 0);
+  gl.uniform2f(downProg.u.uRes, BLOOM_W, BLOOM_H);
+  gl.uniform2f(downProg.u.uSrcTexel, 1.0/ACC_W, 1.0/ACC_H);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomA.f);
   gl.bindTexture(gl.TEXTURE_2D, accTex);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.useProgram(blurProg.p);
+  gl.uniform1i(blurProg.u.uSrc, 0);
+  gl.uniform2f(blurProg.u.uRes, BLOOM_W, BLOOM_H);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomB.f);       // horizontal
+  gl.bindTexture(gl.TEXTURE_2D, bloomA.t);
   gl.uniform2f(blurProg.u.uDir, 1.0/BLOOM_W, 0);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomB.f);       // vertical
-  gl.bindTexture(gl.TEXTURE_2D, bloomA.t);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bloomA.f);       // vertical
+  gl.bindTexture(gl.TEXTURE_2D, bloomB.t);
   gl.uniform2f(blurProg.u.uDir, 0, 1.0/BLOOM_H);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1319,6 +1367,7 @@ function splatPass(){
     gl.uniform1f(h.u.uAbsSig, abs.sig);
     if (pop.shape === 'droplet'){
       gl.uniform1f(h.u.uDropR, pop.dropUm * 1e-6);
+      gl.uniform1f(h.u.uDouble, S.doubleScatter);
     } else {
       const cp = crystalPlanes(pop);
       gl.uniform4fv(h.u['uPlanes[0]'], cp.planes);
@@ -1416,11 +1465,13 @@ function nfPass(){
     gl.uniform1f(h.u.uAlphaMin, Math.max(S.lampBlurDeg, pop.orient === 0 ? 2.5 : 0) * DEG);
     if (pop.shape === 'droplet'){
       gl.uniform1i(h.u.uShape, 0);
+      gl.uniform1f(h.u.uSigmaInv, 1/Math.PI);          // unit entry disk
     } else {
       gl.uniform1i(h.u.uShape, 1);
       const cp = crystalPlanes(pop);
       gl.uniform4fv(h.u['uPlanes[0]'], cp.planes);
       gl.uniform1f(h.u.uBoundR, cp.R);
+      gl.uniform1f(h.u.uSigmaInv, 1/(Math.PI*cp.R*cp.R));
       gl.uniform1i(h.u.uOrient, pop.orient);
       gl.uniform1f(h.u.uWobble, pop.wobbleDeg * DEG);
     }
@@ -1447,10 +1498,9 @@ function displayNFPass(){
   gl.uniform3fv(dispNF.u.uLampPos, lampWorld());
   gl.uniform1f(dispNF.u.uLampR, S.lampR);
   gl.uniform3f(dispNF.u.uLampCol, 1.0, 0.72, 0.42);
-  const cpR = crystalPlanes(S.popA).R;
-  const kPower = (0.12/S.lampR)**2;
+  const kPower = (0.12/S.lampR)**2;   // per-pop cross-section lives in uSigmaInv
   gl.uniform1f(dispNF.u.uNFScale,
-    30.0 * S.density * kPower * (nfW*nfH)/Math.max(nfPhotons, 1) / (Math.PI*cpR*cpR));
+    30.0 * S.density * kPower * (nfW*nfH)/Math.max(nfPhotons, 1));
   gl.uniform1f(dispNF.u.uExposure, S.exposure * 1.2);
   gl.uniform1f(dispNF.u.uGlare, S.glare);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -1473,7 +1523,7 @@ function displayPass(){
   gl.bindTexture(gl.TEXTURE_2D, accTex);
   gl.uniform1i(disp.u.uAccum, 0);
   gl.activeTexture(gl.TEXTURE1);
-  gl.bindTexture(gl.TEXTURE_2D, bloomB.t);
+  gl.bindTexture(gl.TEXTURE_2D, bloomA.t);   // final blur lands back in A
   gl.uniform1i(disp.u.uBloom, 1);
   gl.activeTexture(gl.TEXTURE0);
   gl.uniform2f(disp.u.uRes, w, h);
@@ -1491,6 +1541,7 @@ function displayPass(){
   gl.uniform1i(disp.u.uProj, S.projection);
   gl.uniform1f(disp.u.uNight, S.source === 'moon' ? 1 : 0);
   gl.uniform1f(disp.u.uPixRad, (S.projection === 0 ? S.fov : Math.PI) / h);
+  gl.uniform1f(disp.u.uSrcRad, S.source === 'moon' ? 0.00452 : 0.00465);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
@@ -1662,19 +1713,19 @@ const PRESETS = {
                  popA: PP('droplet', { dropUm:10 }) },
   corona:      { sunEl:40, yawRel:0, pitch:40, fov:16, exp:0.25, sky:1.1,
                  popA: PP('droplet', { dropUm:7 }) },
-  glory:       { sunEl:35, yawRel:180, pitch:-35, fov:20, exp:2.0, sky:0.6, ground:false,
+  glory:       { sunEl:35, yawRel:180, pitch:-35, fov:20, exp:2.6, sky:0.35, ground:false,
                  popA: PP('droplet', { dropUm:12 }) },
   halo:        { sunEl:30, yawRel:0, pitch:35, fov:75, exp:1.0, sky:0.95,
                  popA: PP('hexmix') },
-  sundogs:     { sunEl:25, yawRel:0, pitch:25, fov:80, exp:1.0, sky:0.9,
+  sundogs:     { sunEl:25, yawRel:0, pitch:25, fov:80, exp:0.9, sky:0.9,
                  popA: PP('plate') },
   pillar:      { sunEl:1, yawRel:0, pitch:8, fov:45, exp:1.6, sky:0.55,
-                 popA: PP('plate', { wobbleDeg:10 }) },
+                 popA: PP('plate', { wobbleDeg:7 }) },
   cza:         { sunEl:22, yawRel:0, pitch:68, fov:55, exp:1.4, sky:0.8,
                  popA: PP('plate', { wobbleDeg:1.0, aspect:0.18 }) },
   oddradius:   { sunEl:35, yawRel:0, pitch:90, fov:75, proj:2, exp:1.15, sky:0.9,
                  popA: PP('pyramid') },
-  parry:       { sunEl:18, yawRel:0, pitch:26, fov:65, exp:1.15, sky:0.88,
+  parry:       { sunEl:26, yawRel:0, pitch:32, fov:65, exp:1.15, sky:0.88,
                  popA: PP('column', { orient:3, wobbleDeg:0.8, aspect:2.5 }),
                  popB: PP('column', { wobbleDeg:1.0, aspect:2.5 }), mix:0.55 },
   diamonddust: { sunEl:8, yawRel:0, pitch:12, fov:75, proj:1, exp:1.25, sky:0.72, ds:0.10,
@@ -1706,6 +1757,8 @@ function applyPreset(name){
   S.exposure = p.exp !== undefined ? p.exp : 1;
   S.sky = p.sky !== undefined ? p.sky : 0.9;
   S.ground = p.ground !== false;
+  S.disp = 1.0;        // presets promise specific physics: reset leaked sliders
+  S.bloom = 0.35;
   if (p.lampD) S.lampD = p.lampD;
   if (p.lampH) S.lampH = p.lampH;
   if (p.density) S.density = p.density;
@@ -1720,6 +1773,7 @@ document.querySelectorAll('#proj button').forEach(b => b.addEventListener('click
   document.querySelectorAll('#proj button').forEach(x => x.classList.toggle('sel', x === b));
 }));
 $('btnDay').addEventListener('click', () => {
+  if (S.source === 'lamp') return;   // the sweep would wipe the lamp tracer each frame
   S.dayAnim = !S.dayAnim;
   $('btnDay').classList.toggle('sel', S.dayAnim);
 });
@@ -1852,7 +1906,7 @@ canvas.addEventListener('pointermove', e => {
     drag.x = e.clientX; drag.y = e.clientY;
   }
 });
-const endDrag = () => { drag = null; canvas.classList.remove('dragging'); };
+const endDrag = () => { drag = null; canvas.classList.remove('dragging'); syncSliders(); };
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 
@@ -1883,7 +1937,7 @@ window.addEventListener('resize', resize);
 function frame(){
   resize();
   const now0 = performance.now();
-  if (S.dayAnim && !drag){
+  if (S.dayAnim && !drag && S.source !== 'lamp'){
     // sweep the sun across the sky; the accumulation decays into a live trail
     dayT = (dayT + (now0 - (dayLastT || now0))/45000) % 1;
     dayLastT = now0;
@@ -1894,12 +1948,12 @@ function frame(){
   if (S.source === 'lamp'){
     nfPass();
     displayNFPass();
-    $('compiling').hidden = progNF.ready;
+    $('compiling').hidden = pollProgram(progNF);
   } else {
     splatPass();
     bloomPass();
     displayPass();
-    $('compiling').hidden = progPoly.ready && progSphere.ready;
+    $('compiling').hidden = pollProgram(progPoly) && pollProgram(progSphere);
   }
 
   // sun handle
@@ -1929,6 +1983,7 @@ function frame(){
 function stateToHash(){
   const o = { A: S.popA, B: S.popB, mx: S.mix, ds: S.doubleScatter, mw: S.monoWl,
     so: S.source, lD: S.lampD, lH: +S.lampH.toFixed(2), lR: S.lampR,
+    lb: S.lampBlurDeg, dn: +S.density.toFixed(2), ga: +S.glare.toFixed(2),
     di: +S.disp.toFixed(3), ex: +S.exposure.toFixed(3), sk: +S.sky.toFixed(3),
     gr: S.ground ? 1 : 0, gu: S.guides ? 1 : 0, bl: +S.bloom.toFixed(2), pj: S.projection,
     sa: +S.sunAz.toFixed(4), se: +S.sunEl.toFixed(4),
@@ -1955,6 +2010,9 @@ function loadHash(){
     if (o.lD !== undefined) S.lampD = o.lD;
     if (o.lH !== undefined) S.lampH = o.lH;
     if (o.lR !== undefined) S.lampR = o.lR;
+    if (o.lb !== undefined) S.lampBlurDeg = o.lb;
+    if (o.dn !== undefined) S.density = o.dn;
+    if (o.ga !== undefined) S.glare = o.ga;
     if (o.di !== undefined) S.disp = o.di;
     if (o.ex !== undefined) S.exposure = o.ex;
     if (o.sk !== undefined) S.sky = o.sk;
