@@ -2112,11 +2112,8 @@ $('btnAbout').addEventListener('click', () => $('about').hidden = false);
 $('btnAboutClose').addEventListener('click', () => $('about').hidden = true);
 $('about').addEventListener('click', e => { if (e.target.id === 'about') $('about').hidden = true; });
 
-// dedication modal: shown once on first visit, reopenable from the titlebar
-function dismissDedic(){
-  $('dedic').hidden = true;
-  try { localStorage.setItem('skylightDedication', '1'); } catch (e) {}
-}
+// dedication modal: shown on every load, reopenable from the titlebar
+function dismissDedic(){ $('dedic').hidden = true; }
 $('btnDedic').addEventListener('click', () => $('dedic').hidden = false);
 $('btnDedicClose').addEventListener('click', dismissDedic);
 $('dedic').addEventListener('click', e => { if (e.target.id === 'dedic') dismissDedic(); });
@@ -2400,10 +2397,8 @@ if (burst > 0){
   }
 }
 
-// first visit: show the dedication (suppressed during automated burst renders)
-try {
-  if (!localStorage.getItem('skylightDedication') && burst === 0) $('dedic').hidden = false;
-} catch (e) {}
+// show the dedication on every load (suppressed during automated burst renders)
+if (burst === 0) $('dedic').hidden = false;
 
 setTimeout(() => $('hint').classList.add('fade'), 14000);
 requestAnimationFrame(frame);
