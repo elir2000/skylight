@@ -157,6 +157,39 @@
   }
   #compiling[hidden]{ display:none; }
 
+  /* dedication modal */
+  #dedic{
+    position:fixed; inset:0; background:rgba(3,5,10,.74); backdrop-filter:blur(7px);
+    display:flex; align-items:center; justify-content:center; z-index:25;
+  }
+  #dedic[hidden]{ display:none; }
+  #dedic .box{
+    width:min(600px, calc(100% - 40px)); max-height:calc(100% - 60px); overflow-y:auto;
+    background:#0d1320; border:1px solid var(--line); border-radius:20px; padding:30px 36px 24px;
+    box-shadow:0 30px 90px rgba(0,0,0,.75); position:relative;
+  }
+  #dedic .box::before{
+    content:""; position:absolute; top:0; left:0; right:0; height:3px;
+    border-radius:20px 20px 0 0;
+    background:linear-gradient(90deg,#e5484d,#f5a524,#f2e34c,#46c46b,#4aa8ff,#8a63f0,#c05de0);
+  }
+  #dedic h2{
+    font-size:21px; margin-bottom:2px;
+    background:linear-gradient(90deg,#9ed3ff,#e8c9ff 45%,#ffd9a0); -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  #dedic .sub2{ font-size:12px; color:var(--dim); margin-bottom:16px; }
+  #dedic .poem{
+    font-size:13.5px; line-height:1.75; color:#cdd8e8; font-style:italic;
+    border-left:2px solid rgba(124,196,255,.25); padding-left:16px; margin:14px 0;
+  }
+  #dedic .poem b{ color:#ffe3b8; font-weight:600; }
+  #dedic .note{ font-size:12px; color:var(--dim); font-style:normal; margin:14px 0 18px; line-height:1.6; }
+  #dedic .cta{
+    display:block; margin:0 auto; background:rgba(124,196,255,.14); border:1px solid rgba(124,196,255,.5);
+    color:#cfe8ff; border-radius:999px; padding:9px 26px; font-size:13.5px; cursor:pointer;
+  }
+  #dedic .cta:hover{ background:rgba(124,196,255,.24); }
+
   #err{
     position:fixed; inset:0; display:none; align-items:center; justify-content:center;
     text-align:center; color:#d8e2f0; padding:40px; font-size:15px; z-index:30; background:#080b12;
@@ -170,6 +203,7 @@
 <div id="ui">
   <div class="titlebar">
     <h1>Skylight</h1><div class="sub"></div>
+    <button class="iconbtn" id="btnDedic" title="Dedication — for Dr. Stanley Gedzelman">🌈</button>
     <button class="iconbtn" id="btnDay" title="Play the sun across the sky">▶</button>
     <button class="iconbtn" id="btnPhoto" title="Save a photo (PNG)">📷</button>
     <button class="iconbtn" id="btnAbout" title="How it works">?</button>
@@ -274,6 +308,63 @@
     see is genuine Monte&nbsp;Carlo noise resolving — move the sun and watch it re-converge. The glory is a
     stylized approximation (the real one needs Mie surface waves); everything else emerges from the ray
     physics plus Airy-theory hooks for the droplet wave optics.</p>
+  </div>
+</div>
+
+<div id="dedic" hidden>
+  <div class="box">
+    <h2>For Dr. Stanley Gedzelman</h2>
+    <div class="sub2">a dedication, from a simulator that owes you everything</div>
+    <div class="poem">
+      Dear Dr. Gedzelman — sorry to intrude,<br>
+      but this sky you are holding was built on your view:<br>
+      that optics is more than geometry's art —<br>
+      it's <b>brightness and color</b> that set it apart.<br><br>
+
+      Since <b>1980</b> you've patiently shown<br>
+      why halos won't shine in a cloud overgrown:<br>
+      too thin and they're feeble, too thick and they're gone —<br>
+      the middle-τ band is where wonder turns on.<br>
+      So here is a slider, <b>"Cloud depth,"</b> that sweeps<br>
+      from cirrus so sparse that the blue still peeps,<br>
+      through your optimum band where the ring's at its best,<br>
+      to an overcast gray with the sun dispossessed.<br><br>
+
+      In <b>'94</b> you traced rainbows in color; today<br>
+      a few million photons per frame do it your way —<br>
+      each one is depleted en route to its prism<br>
+      (by Rayleigh, by ozone, by aerosol schism),<br>
+      so when the sun sinks to the rim of the world<br>
+      the halos go amber as sunsets unfurl.<br><br>
+
+      With <b>Lock</b> you showed coronas count droplets like pearls —<br>
+      one radius slider now spins up their swirls;<br>
+      your glories, your cloudbows, your <b>SKYCOLOR</b> skies,<br>
+      your subsuns with <b>Lynch</b> — all here, in disguise.<br>
+      And your newest result made our numbers behave:<br>
+      no mock sun outshines the <b>fourteen-hundred</b> you gave —<br>
+      we checked, and our brightest tops out near twelve-eighty,<br>
+      radiometrically bounded, and only slightly weighty.<br><br>
+
+      The streetlamp in snow, we confess, isn't yours<br>
+      (that's <b>Gislén and Mattsson</b> — we checked out of course);<br>
+      even renaissance men, from textbooks to art,<br>
+      must leave a few photons for others to chart.<br><br>
+
+      So drag the sun down, spin a plate, tip a prism —<br>
+      this toy is your life's work, run through a GPU's prism.<br>
+      From students of wonders you taught how to see:<br>
+      the sky's not just pretty. It's <b>quantitative</b>. Thank you.<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;— <b>Skylight</b>
+    </div>
+    <div class="note">
+      Skylight is a real-time Monte Carlo simulator built in the spirit of your Applied Optics
+      program — phenomena as singly-scattered sunbeams depleted along their atmospheric paths,
+      cloud optical depth as the master visibility variable, and every component (sky, veil, halo,
+      sun disk) on one radiometric scale. Presets carry your published optimal optical-depth bands.
+      The parhelion-brightness ceiling follows "Halo brilliance: real versus ideal" (Appl. Opt. 65, 765, 2026).
+    </div>
+    <button class="cta" id="btnDedicClose">Clear skies ☀</button>
   </div>
 </div>
 
@@ -2020,6 +2111,20 @@ $('btnPhoto').addEventListener('click', () => {
 $('btnAbout').addEventListener('click', () => $('about').hidden = false);
 $('btnAboutClose').addEventListener('click', () => $('about').hidden = true);
 $('about').addEventListener('click', e => { if (e.target.id === 'about') $('about').hidden = true; });
+
+// dedication modal: shown once on first visit, reopenable from the titlebar
+function dismissDedic(){
+  $('dedic').hidden = true;
+  try { localStorage.setItem('skylightDedication', '1'); } catch (e) {}
+}
+$('btnDedic').addEventListener('click', () => $('dedic').hidden = false);
+$('btnDedicClose').addEventListener('click', dismissDedic);
+$('dedic').addEventListener('click', e => { if (e.target.id === 'dedic') dismissDedic(); });
+window.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!$('dedic').hidden) dismissDedic();
+  $('about').hidden = true;
+});
 $('btnCollapse').addEventListener('click', () => {
   const ui = $('ui'); ui.classList.toggle('collapsed');
   $('btnCollapse').textContent = ui.classList.contains('collapsed') ? '+' : '–';
@@ -2294,6 +2399,11 @@ if (burst > 0){
     console.log(`[skylight] nf stats: nzPx=${nz}/${nfW*nfH} accepts=${accepts} sum=${sum.toFixed(1)} max=${mx.toFixed(2)}`);
   }
 }
+
+// first visit: show the dedication (suppressed during automated burst renders)
+try {
+  if (!localStorage.getItem('skylightDedication') && burst === 0) $('dedic').hidden = false;
+} catch (e) {}
 
 setTimeout(() => $('hint').classList.add('fade'), 14000);
 requestAnimationFrame(frame);
