@@ -195,6 +195,8 @@
       <div class="row"><label>Glare</label><input type="range" id="sGlare" min="0" max="1" step="0.001"><output id="oGlare"></output></div>
     </div>
     <div class="row" id="rowWl" hidden><label>Wavelength</label><input type="range" id="sWl" min="0" max="1" step="0.001"><output id="oWl"></output></div>
+    <div class="row" title="Optical depth of the phenomenon cloud — halos are brightest in a middle band and wash out into overcast at high depth"><label>Cloud depth</label><input type="range" id="sTauC" min="0" max="1" step="0.001"><output id="oTauC"></output></div>
+    <div class="row" title="Aerosol haze — builds the aureole around the sun and mutes distant colors"><label>Haze</label><input type="range" id="sTauA" min="0" max="1" step="0.001"><output id="oTauA"></output></div>
     <div class="row"><label>Dispersion</label><input type="range" id="sDisp" min="0" max="1" step="0.001"><output id="oDisp"></output></div>
     <div class="row"><label>Brightness</label><input type="range" id="sExp" min="0" max="1" step="0.001"><output id="oExp"></output></div>
     <div class="row"><label>Sky glow</label><input type="range" id="sSky" min="0" max="1" step="0.001"><output id="oSky"></output></div>
@@ -293,6 +295,10 @@ const S = {
   popB: null,          // optional second population (same fields)
   mix: 0.3,            // fraction of photons from popB when active
   doubleScatter: 0.0,  // probability of a second scattering event
+  tauC: 0.5,           // cloud optical depth of the phenomenon layer (Gedzelman's master variable)
+  tauA: 0.07,          // aerosol vertical optical depth (haze)
+  slabMode: 0,         // 0 horizontal layer, 1 vertical rain shaft, 2 immersed fog
+  backdrop: 1,         // shaft scenes: sky-behind-shaft multiplier (dark cumulonimbus ~0.15)
   source: 'sun',       // 'sun' | 'moon' | 'lamp'
   monoWl: 0,           // 0 = full spectrum, else wavelength in nm
   lampD: 25, lampH: 8, lampR: 0.12,   // streetlamp geometry (meters)
@@ -300,8 +306,8 @@ const S = {
   density: 1.0,        // lamp-mode fog density (display-side)
   glare: 2.0,          // lamp-mode analytic glare strength
   disp: 1.0,           // dispersion multiplier
-  exposure: 1.0,
-  sky: 0.9,
+  exposure: 1.0,       // 1.0 = radiometrically calibrated (S0 = 26.5 sr)
+  sky: 1.4,            // 1.0 = strict single-scatter Rayleigh; 1.4 compensates MS deficit
   ground: true,
   guides: false,
   sunAz: 0.0,
@@ -351,7 +357,21 @@ uniform float uSrcMoon;    // 1 = moonlight spectrum (Planck 4100K/5772K reweigh
 uniform float uAbsK;       // spectral absorption: alpha = K * exp(-((lam-L0)/Sig)^2)
 uniform float uAbsL0;
 uniform float uAbsSig;
+uniform float uMs;         // sun Kasten-Young airmass (0 disables beam depletion)
+uniform float uMO3s;       // 22-km-shell ozone airmass of the sun
+uniform float uTauA550;    // aerosol optical depth at 550 nm
+uniform float uOzone;      // ozone column / 300 DU
 out vec3 vColor;
+
+// beam depletion spectra (Hansen & Travis 1974; Chappuis fit to Serdyuchenko 2014)
+float bTauR(float lam){
+  float u = lam*1.0e-3; float u2 = u*u; float u4 = u2*u2;
+  return 0.008569/u4*(1.0 + 0.0113/u2 + 0.00013/u4);
+}
+float bTauO3(float lam){
+  float a = (lam - 602.0)/54.0; float b = (lam - 522.0)/70.0;
+  return uOzone*(0.0365*exp(-a*a) + 0.0120*exp(-b*b));
+}
 
 uvec3 rs_;
 uvec3 pcg3d(uvec3 v){
@@ -405,12 +425,16 @@ float moonW(float lam){
 
 void splatOut(vec3 d, float lam, float path){
   vec3 s = -d;                       // direction the observer looks toward
-  float u = atan(s.x, -s.z)*0.15915494 + 0.5;
+  float u = fract(atan(s.x, -s.z)*0.15915494 + 0.5);   // fract: u=1 would clip at NDC x=1
+                                                       // and starve the seam column
   float v = acos(clamp(s.y, -1., 1.))*0.31830989;
   float sinT = max(sqrt(max(0., 1.0 - s.y*s.y)), 0.02);
   float ta = (lam - uAbsL0) / uAbsSig;
   float w = exp(-uAbsK * exp(-ta*ta) * path);
   if (uSrcMoon > 0.5) w *= moonW(lam);
+  // sunbeam depleted along its slant atmospheric path before reaching the
+  // particle — this is what reddens halos and bows at sunset (Gedzelman)
+  w *= exp(-(bTauR(lam) + uTauA550*pow(550.0/lam, 1.3))*uMs - bTauO3(lam)*uMO3s);
   vColor = wl2rgb(lam) * w / sinT;
   gl_Position = vec4(u*2.0 - 1.0, v*2.0 - 1.0, 0.0, 1.0);
 }
@@ -703,8 +727,6 @@ uniform mat3  uCam;          // columns: right, up, fwd
 uniform float uTanF;
 uniform vec3  uSunW;
 uniform float uSunAz;
-uniform float uHaloScale;
-uniform float uSkyAmt;
 uniform float uGuides;
 uniform float uGround;
 uniform float uBloomAmt;
@@ -713,7 +735,130 @@ uniform float uNight;        // 0 = sun, 1 = moonlight (mesopic vision, stars)
 uniform float uPixRad;       // angular size of one pixel, radians
 uniform float uSrcRad;       // angular radius of the sun/moon disk, radians
 
+// ---- radiometric scale: everything below works in L/E_sun [1/sr];
+// display pre-ACES = uS0 * (L/E). S0 = 26.5 sr anchors clear-sky zenith
+// Rayleigh at sun_el 40 deg to display 0.18 (Gedzelman-style calibration).
+uniform float uS0;           // 26.5 * exposure slider
+uniform float uKsky;         // molecular-sky gain, 1.0 = strict single scatter (default 1.4)
+uniform float uKphen;        // phenomenon gain, 1.0 = calibrated
+uniform float uMapNorm;      // (2*W*H/pi)/N_photons: accum -> map_value = 4pi*P*T_beam
+uniform float uMuS;          // sin(sun elevation), clamped
+uniform float uMs;           // Kasten-Young sun airmass
+uniform float uMO3s;         // 22-km-shell ozone airmass of the sun
+uniform float uHsDeg;        // sun elevation in degrees (may be negative)
+uniform float uTauA550;      // aerosol optical depth at 550 nm
+uniform float uOzone;        // ozone column / 300 DU
+uniform float uTauC;         // cloud (phenomenon layer) vertical optical depth
+uniform float uVeilT;        // multiply-scattered veil transmittance (JS, delta-Eddington)
+uniform float uGveil;        // veil asymmetry 0.85*exp(-tau_c/2)
+uniform int   uSlabMode;     // 0 horizontal layer, 1 vertical rain shaft, 2 immersed fog
+uniform float uCosSunEl;
+uniform float uBackdrop;     // shaft scenes: sky-behind-shaft multiplier
+uniform vec3  uShaftN;       // horizontal unit normal of the shaft (antisolar)
+uniform vec3  uTdirRGB;      // band-integrated direct-beam transmittance (CIE-weighted)
+uniform vec3  uGndAlb;       // ground albedo per channel
+uniform vec3  uGndLight;     // band-summed (mu_s*Tdir + Ediff) per channel
+
 vec3 aces(vec3 x){ return clamp(x*(2.51*x + 0.03)/(x*(2.43*x + 0.59) + 0.14), 0.0, 1.0); }
+
+// ---- optical depths (Hansen & Travis 1974; Serdyuchenko 2014 Chappuis fit) ----
+float skyTauR(float lam){
+  float u = lam*1.0e-3; float u2 = u*u; float u4 = u2*u2;
+  return 0.008569/u4*(1.0 + 0.0113/u2 + 0.00013/u4);
+}
+float skyTauO3(float lam){
+  float a = (lam - 602.0)/54.0; float b = (lam - 522.0)/70.0;
+  return uOzone*(0.0365*exp(-a*a) + 0.0120*exp(-b*b));
+}
+float skyTauA(float lam){ return uTauA550*pow(550.0/lam, 1.3); }
+float kyAirmass(float hDeg){          // Kasten & Young 1989
+  hDeg = max(hDeg, -1.0);
+  return 1.0/(sin(radians(hDeg)) + 0.50572*pow(hDeg + 6.07995, -1.6364));
+}
+float em1(float x){ return abs(x) < 1e-3 ? 1.0 - 0.5*x + x*x/6.0 : (1.0 - exp(-x))/x; }
+// two-exponential slab kernel, TRANSMISSION geometry (ground observer)
+float slabT(float tau, float ms, float mv){
+  float d = ms - mv;
+  if (abs(d) < 1.0e-4) return mv*tau*exp(-tau*mv);
+  return mv*(exp(-tau*mv) - exp(-tau*ms))/d;
+}
+// REFLECTION geometry (light exits the face it entered): rain shafts
+float slabR(float tau, float ms, float mv){
+  return mv/(ms + mv)*(1.0 - exp(-tau*(ms + mv)));
+}
+float phaseRay(float c){ return 0.05968310*(1.0 + c*c); }
+float phaseHG75(float c){ return 0.03482868*pow(1.5625 - 1.5*c, -1.5); }   // g = 0.75
+float hgP(float c, float g){
+  float d = 1.0 + g*g - 2.0*g*c;
+  return (1.0 - g*g)/(12.5663706*pow(max(d, 1e-6), 1.5));
+}
+
+// ---- 8-node spectral quadrature, 380-700 nm (weights = wl2rgb(lam)/8) ----
+const float SKY_LAM[8] = float[8](400.0,440.0,480.0,520.0,560.0,600.0,640.0,680.0);
+const vec3  SKY_W[8]   = vec3[8](
+  vec3(0.00065,0.00000,0.00808), vec3(0.03354,0.00000,0.23115),
+  vec3(0.00000,0.02460,0.10422), vec3(0.00000,0.15762,0.00000),
+  vec3(0.05366,0.15939,0.00000), vec3(0.30582,0.02087,0.00000),
+  vec3(0.15076,0.00000,0.00000), vec3(0.01142,0.00000,0.00000));
+
+// daytime single-wavelength sky radiance L/E [1/sr]
+float skyDayL(float lam, float mv, float cosTheta, float mus){
+  float tR = skyTauR(lam), tA = skyTauA(lam);
+  float tExt = tR + tA;
+  float tSc  = tR + 0.95*tA;
+  float src  = (phaseRay(cosTheta)*tR + 0.95*phaseHG75(cosTheta)*tA)/tExt;
+  float Lss  = src*slabT(tExt, uMs, mv);
+  // Gedzelman practice: cut single scattering 30%, add veil + ground bounce
+  float Lms  = (mus/3.14159265)*(1.0 - exp(-tSc*mv))
+             * (0.5*(1.0 - exp(-tSc*uMs)) + 0.5*0.15*exp(-tExt*uMs));
+  return (0.70*Lss + Lms)*exp(-skyTauO3(lam)*uMO3s);
+}
+// empirical twilight fallback (ozone zenith blue built in)
+float skyTwiL(float lam, float elvDeg, float cosDaz){
+  float Z    = 1.2e-3*exp(uHsDeg/1.4);
+  float Szen = exp(-skyTauO3(lam)*22.0)*pow(550.0/lam, 1.5);
+  float Gzen = 0.4 + 0.6*clamp(sin(radians(elvDeg)), 0.0, 1.0);
+  float H    = 0.13*exp(uHsDeg/2.2);
+  float Shor = exp(-(skyTauR(lam) + skyTauA(lam))*5.0 - skyTauO3(lam)*8.0);
+  float az   = 0.15 + 0.85*pow(0.5 + 0.5*cosDaz, 3.0);
+  float Ghor = exp(-max(elvDeg, 0.0)/11.0)*az;
+  return Z*Szen*Gzen + H*Shor*Ghor;
+}
+vec3 physicalSky(vec3 dir, vec3 sunW){
+  float elvDeg   = degrees(asin(clamp(dir.y, -1.0, 1.0)));
+  float mv       = kyAirmass(max(elvDeg, 0.0));
+  float cosTheta = clamp(dot(dir, sunW), -1.0, 1.0);
+  vec2  dH = dir.xz;  float dl = length(dH);
+  vec2  sH = sunW.xz; float sl = length(sH);
+  float cosDaz = (dl > 1.0e-5 && sl > 1.0e-5) ? clamp(dot(dH/dl, sH/sl), -1.0, 1.0) : 1.0;
+  float mus = max(sunW.y, 0.0);
+  float f   = smoothstep(-6.0, 2.0, uHsDeg);
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < 8; i++){
+    float lam = SKY_LAM[i];
+    float Ld  = (f > 0.001) ? skyDayL(lam, mv, cosTheta, mus) : 0.0;
+    float Lt  = (f < 0.999) ? skyTwiL(lam, elvDeg, cosDaz)    : 0.0;
+    acc += mix(Lt, Ld, f)*SKY_W[i];
+  }
+  return acc;
+}
+// gray slab geometry factor for the traced phenomenon layer
+float phenomF(vec3 dir){
+  if (uSlabMode == 0)
+    return slabT(uTauC, uMs, kyAirmass(degrees(asin(clamp(abs(dir.y), 0.03, 1.0)))));
+  if (uSlabMode == 1){
+    float ms = 1.0/max(uCosSunEl, 0.05);
+    float mv = 1.0/max(dot(dir, uShaftN), 0.05);
+    return slabR(uTauC, ms, mv);
+  }
+  return exp(-0.5*uTauC/max(uMuS, 0.02))*(1.0 - exp(-uTauC));   // immersed fog (crude)
+}
+// multiply-scattered cloud veil (delta-Eddington transmittance from JS)
+vec3 veilLoverE(vec3 dir, float cosT){
+  float grad = (uSlabMode == 0) ? (3.0/7.0)*(1.0 + 2.0*clamp(dir.y, 0.0, 1.0)) : 1.0;
+  float ang  = 12.5663706*hgP(cosT, uGveil);   // -> 1 as g_veil -> 0
+  return uTdirRGB * (uMuS*uVeilT/3.14159265) * grad * ang;
+}
 
 // mesopic / Purkinje: blend dim colors toward the rod response (Larson 1997
 // scotopic luminance), gated so bright cores keep their cone color
@@ -797,44 +942,45 @@ void main(){
   float ca = cos(uSunAz), sa = sin(uSunAz);
   vec3 md = vec3(ca*dir.x + sa*dir.z, dir.y, -sa*dir.x + ca*dir.z);
   vec2 uv = vec2(atan(md.x, -md.z)*0.15915494 + 0.5, acos(clamp(md.y, -1., 1.))*0.31830989);
-  vec3 halo = texture(uAccum, uv).rgb * uHaloScale;
-  halo += texture(uBloom, uv).rgb * uHaloScale * uBloomAmt;
-  halo *= 1.0 - 0.35*uNight;         // rods see halos with less contrast
+  // map_value = 4pi * P(dir) * T_beam(lambda), beam depletion baked per photon
+  vec3 mapv = (texture(uAccum, uv).rgb + texture(uBloom, uv).rgb*uBloomAmt) * uMapNorm;
 
-  // atmosphere
-  float sunH = uSunW.y;
-  float day  = smoothstep(-0.18, 0.12, sunH) * (1.0 - uNight);
-  float h = clamp(dir.y, 0.0, 1.0);
-  vec3 zen = mix(vec3(0.008,0.012,0.030), vec3(0.043,0.135,0.36), day);
-  vec3 hor = mix(vec3(0.055,0.048,0.065), vec3(0.40,0.55,0.74), day);
   float cosSun = clamp(dot(dir, uSunW), -1.0, 1.0);
   float ang = acos(cosSun);
-  float lowSun = 1.0 - smoothstep(0.03, 0.45, abs(sunH));
-  hor = mix(hor, vec3(0.82,0.47,0.26), lowSun*0.6*smoothstep(-0.4, 0.8, cosSun)*max(day, 0.25));
-  vec3 sky = mix(hor, zen, pow(h, 0.55));
-  sky += (vec3(1.0,0.92,0.80)*0.16*exp(-ang*ang*22.0) + vec3(1.0,0.95,0.85)*0.030/(ang*36.0 + 1.0)) * max(day, 0.15);
-  // analytic solar/lunar disk (the direct beam is excluded from the MC map)
+  float mvKY = kyAirmass(degrees(asin(clamp(abs(dir.y), 0.0, 1.0))));
+
+  // phenomenon layer: pure phase function x slab geometry factor
+  vec3 halo = uKphen * mapv * phenomF(dir) * 0.0795775;   // 1/(4pi)
+  halo *= 1.0 - 0.35*uNight;         // rods see halos with less contrast
+
+  // background sky dimmed by the cloud; veil is the multiply-scattered light
+  float bgT = exp(-0.2775*uTauC*mvKY) * uBackdrop;        // 0.2775 = 1-g^2
+  vec3 LoverE = uKsky * physicalSky(dir, uSunW) * bgT
+              + veilLoverE(dir, cosSun);
+  // analytic solar/lunar disk at its TRUE radiance: ACES clips it white until
+  // the overcast swallows it around tau_c ~ 8 (emergent, not tuned)
   {
     float eA = 1.5*fwidth(ang) + 1e-4;
     float diskA = 1.0 - smoothstep(uSrcRad - eA, uSrcRad + eA, ang);
     if (diskA > 0.0){
       float mu = sqrt(max(1.0 - (ang*ang)/(uSrcRad*uSrcRad), 0.0));
-      vec3 srcCol = uNight > 0.5 ? vec3(1.0, 0.86, 0.70)*(0.82 + 0.18*mu)
-                                 : vec3(1.0, 0.98, 0.94);
-      sky += srcCol * 40.0 * diskA;
+      vec3 srcTint = uNight > 0.5 ? vec3(1.0, 0.86, 0.70)*(0.82 + 0.18*mu) : vec3(1.0);
+      LoverE += diskA * srcTint * uTdirRGB * exp(-uTauC/max(uMuS, 0.02)) * 14706.0;
     }
   }
-  vec3 bg = sky;
+  vec3 bg = uS0 * LoverE;
   if (uGround > 0.5 && dir.y < 0.0){
-    vec3 g = vec3(0.050,0.056,0.060) * mix(1.25, 0.35, clamp(-dir.y*3.0, 0., 1.)) * max(day, 0.15);
-    bg = mix(g, hor*0.85, exp(dir.y*11.0));
-    halo *= 0.55;
+    vec3 gnd = uS0 * uGndAlb * uGndLight * 0.3183099;     // a*(mu_s*T + E_diff)/pi
+    float gf = exp(dir.y*11.0);
+    bg = mix(gnd, bg, gf);
+    halo *= mix(0.06, 1.0, gf);   // the ground occludes the distant particle field
   }
-  bg += uNight * vec3(0.016, 0.022, 0.035) * (0.4 + 0.6*uSkyAmt);
-  bg *= uSkyAmt;
-  vec3 col = mesopic(bg + halo, uNight);
+  bg += uNight * vec3(0.016, 0.022, 0.035);
+  // white balance: the spectral pipeline's flat-spectrum white is equal-energy
+  // (R-heavy in linear sRGB); this von-Kries step renders it neutral
+  vec3 col = mesopic((bg + uS0*halo) * vec3(0.652, 1.0, 1.056), uNight);
   if (uNight > 0.01){
-    float haloLuma = dot(halo, vec3(0.2126, 0.7152, 0.0722));
+    float haloLuma = dot(uS0*halo, vec3(0.2126, 0.7152, 0.0722));
     float starVis = uNight * exp(-40.0*haloLuma);
     if (uGround > 0.5 && dir.y < 0.0) starVis = 0.0;
     col += (stars(md) + milkyWay(md)) * starVis;
@@ -1269,6 +1415,51 @@ function materialAB(pop){
   return [n550 - Bm/302500, Bm];
 }
 
+// ---- radiometric per-frame quantities (Gedzelman calibration) ----
+// 8-node spectral quadrature over 380-700 nm; weights = wl2rgb(node)/8
+const SKY_LAM = [400, 440, 480, 520, 560, 600, 640, 680];
+const SKY_W = [[0.00065,0,0.00808],[0.03354,0,0.23115],[0,0.02460,0.10422],[0,0.15762,0],
+               [0.05366,0.15939,0],[0.30582,0.02087,0],[0.15076,0,0],[0.01142,0,0]];
+const skyTauR  = l => { const u = l*1e-3, u2 = u*u, u4 = u2*u2; return 0.008569/u4*(1 + 0.0113/u2 + 0.00013/u4); };
+const skyTauO3 = l => { const a = (l-602)/54, b = (l-522)/70; return 0.0365*Math.exp(-a*a) + 0.0120*Math.exp(-b*b); };
+function kyAirmass(elRad){
+  const hDeg = Math.max(elRad/DEG, 0);
+  return 1/(Math.sin(hDeg*DEG) + 0.50572*Math.pow(hDeg + 6.07995, -1.6364));
+}
+function o3Airmass(elRad){
+  const c = Math.cos(Math.max(elRad, 0))*6371/6393;
+  return 1/Math.sqrt(1 - c*c);
+}
+function radiometry(){
+  const el = S.sunEl, hsDeg = el/DEG;
+  const muS = Math.max(Math.sin(el), 0.02);
+  const ms = kyAirmass(el), mo3 = o3Airmass(el);
+  const mus0 = Math.max(Math.sin(el), 0);
+  // twilight ground-light floor — the exponential is a TWILIGHT fit and must be
+  // gated out in daytime or it explodes (e^(h/1.4) at h=20 is ~1.6e6)
+  const twiT = Math.min(Math.max((hsDeg + 6)/8, 0), 1);
+  const twiF = twiT*twiT*(3 - 2*twiT);
+  const Zamp = 1.2e-3*Math.exp(Math.min(hsDeg, 2)/1.4)*(1 - twiF);
+  const Tdir = [0,0,0], Gnd = [0,0,0];
+  for (let i = 0; i < 8; i++){
+    const l = SKY_LAM[i];
+    const tR = skyTauR(l), tA = S.tauA*Math.pow(550/l, 1.3), tO = skyTauO3(l);
+    const T = Math.exp(-(tR + tA)*ms - tO*mo3);
+    const tSc = tR + 0.95*tA;
+    const Ediff = 0.55*mus0*(1 - Math.exp(-tSc*ms))*Math.exp(-tO*mo3)
+                + 3.0*Zamp*Math.exp(-tO*22.0)*Math.pow(550/l, 1.5);
+    for (let k = 0; k < 3; k++){ Tdir[k] += T*SKY_W[i][k]; Gnd[k] += (mus0*T + Ediff)*SKY_W[i][k]; }
+  }
+  // multiply-scattered veil: conservative delta-Eddington slab
+  // (Shettle & Weinman 1970; Joseph, Wiscombe & Weinman 1976), g = 0.85
+  const g = 0.85, tau = S.tauC;
+  const muE = S.slabMode === 1 ? Math.max(Math.cos(el), 0.05) : muS;
+  const TdirE = Math.exp(-(1 - g*g)*tau/muE);
+  const Ttot = ((2 + 3*muE) + (2 - 3*muE)*TdirE)/(4 + 3*(1 - g)*tau);
+  const Tveil = S.slabMode === 1 ? Math.max(1 - Ttot, 0) : Math.max(Ttot - TdirE, 0);
+  return { muS, ms, mo3, hsDeg, Tdir, Gnd, Tveil, gVeil: g*Math.exp(-0.5*tau) };
+}
+
 function clearAccum(){ pendingFade = 0; }
 // decay instead of clear: parameter drags leave a fading trail rather than
 // hard-resetting the sky, so motion feels continuous
@@ -1358,6 +1549,10 @@ function splatPass(){
     gl.uniform1ui(h.u.uSeed, frameSeed);
     gl.uniform1f(h.u.uSunEl, S.sunEl);
     gl.uniform1f(h.u.uSunRad, S.source === 'moon' ? 0.00452 : 0.00465);
+    gl.uniform1f(h.u.uMs, kyAirmass(S.sunEl));
+    gl.uniform1f(h.u.uMO3s, o3Airmass(S.sunEl));
+    gl.uniform1f(h.u.uTauA550, S.tauA);
+    gl.uniform1f(h.u.uOzone, 1.0);
     gl.uniform1f(h.u.uNA, A);
     gl.uniform1f(h.u.uNB, B);
     gl.uniform1f(h.u.uMonoWl, S.monoWl);
@@ -1447,6 +1642,8 @@ function nfPass(){
   gl.uniform3f(h.u.uLampCol, 1.0, 0.72, 0.42);
   gl.uniform1f(h.u.uSunEl, 0); gl.uniform1f(h.u.uSunRad, 0.005);
   gl.uniform1f(h.u.uSrcMoon, 0);
+  gl.uniform1f(h.u.uMs, 0); gl.uniform1f(h.u.uMO3s, 0);   // no beam depletion in lamp mode
+  gl.uniform1f(h.u.uTauA550, 0); gl.uniform1f(h.u.uOzone, 0);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.ONE, gl.ONE);
   const pops = S.popB ? [[S.popA, 1 - S.mix], [S.popB, S.mix]] : [[S.popA, 1]];
@@ -1532,9 +1729,29 @@ function displayPass(){
   gl.uniform1f(disp.u.uTanF, Math.tan(S.fov/2));
   gl.uniform3fv(disp.u.uSunW, sunWorld());
   gl.uniform1f(disp.u.uSunAz, S.sunAz);
-  const K = (2*ACC_W*ACC_H/Math.PI) / Math.max(photons, 1);
-  gl.uniform1f(disp.u.uHaloScale, K * S.exposure * 0.13);
-  gl.uniform1f(disp.u.uSkyAmt, S.sky);
+  const R = radiometry();
+  // S0 = 26.5 sr is the strict zenith->0.18 anchor; 0.65 stop of headroom keeps
+  // bright bow interiors and veils out of the ACES shoulder at exposure 1.0
+  gl.uniform1f(disp.u.uS0, 17.2 * S.exposure);
+  gl.uniform1f(disp.u.uKsky, S.sky);
+  gl.uniform1f(disp.u.uKphen, 1.0);
+  gl.uniform1f(disp.u.uMapNorm, (2*ACC_W*ACC_H/Math.PI)/Math.max(photons, 1));
+  gl.uniform1f(disp.u.uMuS, R.muS);
+  gl.uniform1f(disp.u.uMs, R.ms);
+  gl.uniform1f(disp.u.uMO3s, R.mo3);
+  gl.uniform1f(disp.u.uHsDeg, R.hsDeg);
+  gl.uniform1f(disp.u.uTauA550, S.tauA);
+  gl.uniform1f(disp.u.uOzone, 1.0);
+  gl.uniform1f(disp.u.uTauC, S.tauC);
+  gl.uniform1f(disp.u.uVeilT, R.Tveil);
+  gl.uniform1f(disp.u.uGveil, R.gVeil);
+  gl.uniform1i(disp.u.uSlabMode, S.slabMode);
+  gl.uniform1f(disp.u.uCosSunEl, Math.cos(S.sunEl));
+  gl.uniform1f(disp.u.uBackdrop, S.backdrop);
+  gl.uniform3f(disp.u.uShaftN, Math.sin(S.sunAz + Math.PI), 0, -Math.cos(S.sunAz + Math.PI));
+  gl.uniform3fv(disp.u.uTdirRGB, R.Tdir);
+  gl.uniform3fv(disp.u.uGndAlb, [0.08, 0.15, 0.05]);
+  gl.uniform3fv(disp.u.uGndLight, R.Gnd);
   gl.uniform1f(disp.u.uGuides, S.guides ? 1 : 0);
   gl.uniform1f(disp.u.uGround, S.ground ? 1 : 0);
   gl.uniform1f(disp.u.uBloomAmt, S.bloom);
@@ -1568,6 +1785,8 @@ function bindRange(el, out, map, get, set, fmt){
 }
 const sliders = [
   { el:'sWl',    out:'oWl',    map: lin(380, 700),    get: () => S.monoWl || 550, set: v => { S.monoWl = Math.round(v); softClear(0.7); }, fmt: v => v.toFixed(0) + ' nm' },
+  { el:'sTauC',  out:'oTauC',  map: logMap(0.001, 10),get: () => S.tauC,      set: v => { S.tauC = v; },                     fmt: v => v >= 1 ? v.toFixed(1) : v.toFixed(3) },
+  { el:'sTauA',  out:'oTauA',  map: lin(0, 0.5),      get: () => S.tauA,      set: v => { S.tauA = v; softClear(0.8); },     fmt: v => v.toFixed(2) },
   { el:'sDisp',  out:'oDisp',  map: logMap(0.5, 4),   get: () => S.disp,      set: v => { S.disp = v; softClear(0.75); },    fmt: v => '×' + v.toFixed(1) },
   { el:'sExp',   out:'oExp',   map: logMap(0.15, 8),  get: () => S.exposure,  set: v => { S.exposure = v; },              fmt: v => '×' + (v >= 1 ? v.toFixed(1) : v.toFixed(2)) },
   { el:'sSky',   out:'oSky',   map: { to: t => 2*t, from: v => v/2 }, get: () => S.sky, set: v => { S.sky = v; },         fmt: v => v.toFixed(2) },
@@ -1705,35 +1924,36 @@ const PP = (card, over) => {
   return Object.assign(p, over || {});
 };
 const PRESETS = {
-  rainbow:     { sunEl:20, yawRel:180, pitch:15, fov:90, exp:1.25, sky:0.85,
+  // tauC values follow Gedzelman's optimal visibility bands per phenomenon
+  rainbow:     { sunEl:20, yawRel:180, pitch:15, fov:90, tauC:0.8, sm:1, bd:0.15,
                  popA: PP('droplet', { dropUm:400 }) },
-  super:       { sunEl:12, yawRel:180, pitch:26, fov:38, exp:1.4, sky:0.8,
+  super:       { sunEl:12, yawRel:180, pitch:26, fov:38, tauC:0.25, sm:1, bd:0.5,
                  popA: PP('droplet', { dropUm:200 }) },
-  fogbow:      { sunEl:15, yawRel:180, pitch:10, fov:100, exp:2.8, sky:0.95, ds:0.05,
+  fogbow:      { sunEl:15, yawRel:180, pitch:10, fov:100, tauC:1.2, sm:2, ds:0.05,
                  popA: PP('droplet', { dropUm:10 }) },
-  corona:      { sunEl:40, yawRel:0, pitch:40, fov:16, exp:0.25, sky:1.1,
+  corona:      { sunEl:40, yawRel:0, pitch:40, fov:16, tauC:0.2,
                  popA: PP('droplet', { dropUm:7 }) },
-  glory:       { sunEl:35, yawRel:180, pitch:-35, fov:20, exp:2.6, sky:0.35, ground:false,
+  glory:       { sunEl:35, yawRel:180, pitch:-35, fov:20, tauC:1.5, sm:2, ground:false,
                  popA: PP('droplet', { dropUm:12 }) },
-  halo:        { sunEl:30, yawRel:0, pitch:35, fov:75, exp:1.0, sky:0.95,
+  halo:        { sunEl:30, yawRel:0, pitch:35, fov:75, tauC:0.6,
                  popA: PP('hexmix') },
-  sundogs:     { sunEl:25, yawRel:0, pitch:25, fov:80, exp:0.9, sky:0.9,
+  sundogs:     { sunEl:25, yawRel:0, pitch:25, fov:80, tauC:0.35,
                  popA: PP('plate') },
-  pillar:      { sunEl:1, yawRel:0, pitch:8, fov:45, exp:1.6, sky:0.55,
+  pillar:      { sunEl:1, yawRel:0, pitch:8, fov:45, tauC:0.08,
                  popA: PP('plate', { wobbleDeg:7 }) },
-  cza:         { sunEl:22, yawRel:0, pitch:68, fov:55, exp:1.4, sky:0.8,
+  cza:         { sunEl:22, yawRel:0, pitch:68, fov:55, tauC:0.35,
                  popA: PP('plate', { wobbleDeg:1.0, aspect:0.18 }) },
-  oddradius:   { sunEl:35, yawRel:0, pitch:90, fov:75, proj:2, exp:1.15, sky:0.9,
+  oddradius:   { sunEl:35, yawRel:0, pitch:90, fov:75, proj:2, tauC:0.4,
                  popA: PP('pyramid') },
-  parry:       { sunEl:26, yawRel:0, pitch:32, fov:65, exp:1.15, sky:0.88,
+  parry:       { sunEl:26, yawRel:0, pitch:32, fov:65, tauC:0.5,
                  popA: PP('column', { orient:3, wobbleDeg:0.8, aspect:2.5 }),
                  popB: PP('column', { wobbleDeg:1.0, aspect:2.5 }), mix:0.55 },
-  diamonddust: { sunEl:8, yawRel:0, pitch:12, fov:75, proj:1, exp:1.25, sky:0.72, ds:0.10,
+  diamonddust: { sunEl:8, yawRel:0, pitch:12, fov:75, proj:1, tauC:0.12, ds:0.10,
                  popA: PP('plate', { wobbleDeg:2.5, aspect:0.18 }),
                  popB: PP('column', { wobbleDeg:2.0 }), mix:0.45 },
-  moonhalo:    { source:'moon', sunEl:35, yawRel:0, pitch:40, fov:75, exp:0.7, sky:0.5,
+  moonhalo:    { source:'moon', sunEl:35, yawRel:0, pitch:40, fov:75, tauC:0.6, exp:0.7, sky:0.8,
                  popA: PP('hexmix') },
-  moonbow:     { source:'moon', sunEl:20, yawRel:180, pitch:12, fov:80, exp:1.75, sky:0.5,
+  moonbow:     { source:'moon', sunEl:20, yawRel:180, pitch:12, fov:80, tauC:0.6, sm:1, bd:0.3, exp:1.75, sky:0.8,
                  popA: PP('droplet', { dropUm:350 }) },
   streetlamp:  { source:'lamp', monoWl:589, pitch:10, fov:60, exp:2.0, sky:0,
                  lampD:25, lampH:8, ds:0, density:2, lampBlur:2,
@@ -1749,13 +1969,17 @@ function applyPreset(name){
   S.popB = p.popB ? Object.assign({}, p.popB) : null;
   S.mix = p.mix !== undefined ? p.mix : 0.3;
   S.doubleScatter = p.ds || 0;
+  S.tauC = p.tauC !== undefined ? p.tauC : 0.5;
+  S.tauA = p.tauA !== undefined ? p.tauA : 0.07;
+  S.slabMode = p.sm || 0;
+  S.backdrop = p.bd !== undefined ? p.bd : 1;
   if (p.sunEl !== undefined) S.sunEl = p.sunEl * DEG;
   S.camYaw = S.sunAz + (p.yawRel || 0) * DEG;
   S.camPitch = (p.pitch !== undefined ? p.pitch : 20) * DEG;
   S.fov = (p.fov || 75) * DEG;
   S.projection = p.proj || 0;
   S.exposure = p.exp !== undefined ? p.exp : 1;
-  S.sky = p.sky !== undefined ? p.sky : 0.9;
+  S.sky = p.sky !== undefined ? p.sky : 1.4;
   S.ground = p.ground !== false;
   S.disp = 1.0;        // presets promise specific physics: reset leaked sliders
   S.bloom = 0.35;
@@ -1982,6 +2206,7 @@ function frame(){
 // shareable state: the whole setup lives in the URL hash
 function stateToHash(){
   const o = { A: S.popA, B: S.popB, mx: S.mix, ds: S.doubleScatter, mw: S.monoWl,
+    tc: +S.tauC.toFixed(4), ta: +S.tauA.toFixed(3), sm2: S.slabMode, bd: +S.backdrop.toFixed(2),
     so: S.source, lD: S.lampD, lH: +S.lampH.toFixed(2), lR: S.lampR,
     lb: S.lampBlurDeg, dn: +S.density.toFixed(2), ga: +S.glare.toFixed(2),
     di: +S.disp.toFixed(3), ex: +S.exposure.toFixed(3), sk: +S.sky.toFixed(3),
@@ -2006,6 +2231,10 @@ function loadHash(){
     if (o.mx !== undefined) S.mix = o.mx;
     if (o.ds !== undefined) S.doubleScatter = o.ds;
     if (o.mw !== undefined) S.monoWl = o.mw;
+    if (o.tc !== undefined) S.tauC = o.tc;
+    if (o.ta !== undefined) S.tauA = o.ta;
+    if (o.sm2 !== undefined) S.slabMode = o.sm2;
+    if (o.bd !== undefined) S.backdrop = o.bd;
     if (o.so) S.source = o.so;
     if (o.lD !== undefined) S.lampD = o.lD;
     if (o.lH !== undefined) S.lampH = o.lH;

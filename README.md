@@ -42,9 +42,17 @@ sundogs, pillar, cza, oddradius, parry, diamonddust, moonhalo, moonbow, streetla
 
 - WebGL2, single file. Monte Carlo runs in vertex shaders (one point = one photon)
   splatting into an equirect RGBA32F radiance map with additive blending; ACES display
-  pass adds an analytic atmosphere, night sky (Larson-1997 scotopic blend, star field),
-  and map-space bloom. Programs are split per particle family and linked with
-  `KHR_parallel_shader_compile` to keep D3D shader-compile stalls off the UI thread.
+  pass composites everything on one radiometric scale (L/E_sun; zenith Rayleigh at
+  sun 40° anchored to mid-gray): an 8-node spectral single-scattering sky
+  (Hansen-Travis Rayleigh, Chappuis ozone, Henyey-Greenstein aerosol, Kasten-Young
+  airmass, empirical twilight), a cloud slab model for the phenomenon layer
+  (transmission/reflection/immersed geometries + delta-Eddington multiple-scatter
+  veil — Gedzelman's optical-depth visibility bands emerge from it), per-photon
+  sunbeam depletion (halos redden at sunset), a true-radiance sun disk that ACES
+  swallows into overcast near τ≈8, night sky (Larson-1997 scotopic blend, star
+  field), and map-space bloom. Programs are split per particle family and linked
+  with `KHR_parallel_shader_compile` to keep D3D shader-compile stalls off the UI
+  thread.
 - The sky map is stored sun-azimuth-relative: azimuth drags are free; other parameter
   drags decay the accumulation (`blendColor` trick) into a live motion trail.
 - The streetlamp mode is a separate reverse single-scatter path tracer: photons pick a
